@@ -2,6 +2,7 @@
 
 #include <esp_err.h>
 #include <stdbool.h>
+#include <time.h>
 
 #define SIM7080G_UART_BAUD_RATE 115200
 #define SIM87080G_UART_BUFF_SIZE 1024
@@ -31,6 +32,12 @@ typedef struct {
   char client_id[MQTT_BROKER_CLIENT_ID_MAX_CHARS];
   char client_password[MQTT_BROKER_PASSWORD_MAX_CHARS];
   uint16_t port;
+
+  // TLS Support
+  bool use_tls;
+  uint8_t ssl_context_index;          // SSL context index (e.g., 0)
+  char ca_cert_filename_on_modem[32]; // Filename of CA cert on modem (e.g.,
+                                      // "ca.crt")
 } sim7080g_mqtt_config_t;
 
 /**
@@ -208,6 +215,53 @@ esp_err_t sim7080g_is_application_layer_connected(
 /// @brief Test the UART connection by sending a command and checking for a
 /// response
 bool sim7080g_test_uart_loopback(sim7080g_handle_t *sim7080g_handle);
+
+/**
+ * @brief Uploads a file (e.g., certificate) to the modem's filesystem.
+ *
+ * @param handle Pointer to the sim7080g_handle_t.
+ * @param fs_index Filesystem index (e.g., 3 for /customer/).
+ * @param filename_on_modem The desired filename on the modem.
+ * @param file_data Pointer to the null-terminated string data of the file.
+ * @param timeout_ms Timeout for file write operation.
+ * @return esp_err_t ESP_OK on success.
+ */
+esp_err_t sim7080g_fs_upload_text_file(const sim7080g_handle_t *handle,
+                                       uint8_t fs_index,
+                                       const char *filename_on_modem,
+                                       const char *file_data,
+                                       uint32_t timeout_ms);
+
+/**
+ * @brief Configures SSL context on the modem for MQTTS.
+ * Uploads the CA certificate and sets SSL parameters.
+ *
+ * @param handle Pointer to the sim7080g_handle_t (must have
+ * mqtt_config.use_ssl=true, mqtt_config.ssl_context_index, and
+ * mqtt_config.ca_cert_filename_on_modem set).
+ * @param ca_cert_pem_data Null-terminated string containing the CA certificate
+ * in PEM format.
+ * @return esp_err_t ESP_OK on success.
+ */
+esp_err_t sim7080g_mqtts_configure_ssl(const sim7080g_handle_t *handle,
+                                       const char *ca_cert_pem_data);
+
+/**
+ * @brief Gets the current UTC time from the modem and returns it as an epoch
+ * timestamp.
+ *
+ * This function sends AT+CCLK? to the modem, parses the response
+ * ("yy/MM/dd,hh:mm:ss±zz"), adjusts for the timezone offset to get UTC, and
+ * then converts it to a time_t (epoch) value. It's recommended to have network
+ * time synchronization enabled on the modem (AT+CLTS=1) for accurate time.
+ *
+ * @param handle Pointer to the initialized sim7080g_handle_t.
+ * @param epoch_time_utc Pointer to a time_t variable where the UTC epoch time
+ * will be stored.
+ * @return esp_err_t ESP_OK on success, ESP_FAIL or specific error on failure.
+ */
+esp_err_t sim7080g_get_epoch_time_utc(const sim7080g_handle_t *handle,
+                                      time_t *epoch_time_utc);
 
 #ifdef __cplusplus
 }

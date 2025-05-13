@@ -12,6 +12,7 @@
 #define AT_RESPONSE_MAX_LEN 256
 
 static const char *TAG = "SIM7080G Driver";
+static const char *TAG_MQTTS = "SIM7080G MQTTS";
 
 // Static Fxn Declarations:
 static esp_err_t sim7080g_echo_off(const sim7080g_handle_t *sim7080g_handle);
@@ -39,6 +40,11 @@ esp_err_t sim7080g_config(sim7080g_handle_t *sim7080g_handle,
 
   return ESP_OK;
 }
+
+static esp_err_t sim7080g_wait_for_prompt(const sim7080g_handle_t *handle,
+                                          char *buffer, size_t buffer_len,
+                                          const char *prompt,
+                                          uint32_t timeout_ms);
 
 // ---------------------  EXTERNAL EXPOSED API FXNs  -------------------------//
 esp_err_t sim7080g_init(sim7080g_handle_t *sim7080g_handle) {
@@ -808,6 +814,115 @@ sim7080g_mqtt_set_parameters(const sim7080g_handle_t *sim7080g_handle) {
   return ESP_OK;
 }
 
+// esp_err_t
+// sim7080g_mqtt_connect_to_broker(const sim7080g_handle_t *sim7080g_handle) {
+//   if (!sim7080g_handle) {
+//     ESP_LOGE(TAG, "Invalid device handle");
+//     return ESP_ERR_INVALID_ARG;
+//   }
+
+//   sim7080g_mqtt_connection_status_t curr_status;
+//   esp_err_t ret =
+//       sim7080g_mqtt_get_broker_connection_status(sim7080g_handle,
+//       &curr_status);
+//   if (ret != ESP_OK) {
+//     ESP_LOGE(TAG, "Failed to check current connection status");
+//     return ret;
+//   }
+
+//   if (curr_status != MQTT_STATUS_DISCONNECTED) {
+//     ESP_LOGI(TAG, "MQTT broker already connected");
+//     return ESP_OK;
+//   }
+
+//   // Verify network broker connected before attempting MQTT connect
+//   int pdpidx = 0;
+//   int status;
+//   char address[32];
+//   ret = sim7080g_get_app_network_active(sim7080g_handle, pdpidx, &status,
+//                                         address, sizeof(address));
+//   if (ret != ESP_OK) {
+//     ESP_LOGE(TAG, "Failed to get network active status");
+//     return ret;
+//   }
+//   if (status <= 0) {
+//     ESP_LOGE(TAG, "Network bearer not connected");
+//     return ESP_FAIL;
+//   }
+
+//   ESP_LOGI(TAG, "Attempting to connect to MQTT broker");
+
+//   char response[AT_RESPONSE_MAX_LEN] = {0};
+//   ret = send_at_cmd(sim7080g_handle, &AT_SMCONN, AT_CMD_TYPE_EXECUTE, NULL,
+//                     response, sizeof(response),
+//                     15000); // 15 second timeout for connection
+
+//   if (ret != ESP_OK) {
+//     ESP_LOGE(TAG, "Failed to send MQTT connect command");
+//     return ret;
+//   }
+
+//   // Check for error responses
+//   if (strstr(response, "ERROR") != NULL) {
+//     // Extract error code if present
+//     char *error_start = strstr(response, "+CME ERROR:");
+//     if (error_start != NULL) {
+//       int error_code;
+//       if (sscanf(error_start, "+CME ERROR: %d", &error_code) == 1) {
+//         // Map error code to appropriate ESP error code and log details
+//         switch (error_code) {
+//         case MQTT_ERR_NETWORK:
+//           ESP_LOGE(TAG, "MQTT connection failed: Network error");
+//           return MQTT_ERR_NETWORK;
+
+//         case MQTT_ERR_PROTOCOL:
+//           ESP_LOGE(TAG, "MQTT connection failed: Protocol error");
+//           return MQTT_ERR_PROTOCOL;
+
+//         case MQTT_ERR_UNAVAILABLE:
+//           ESP_LOGE(TAG, "MQTT connection failed: Broker unavailable");
+//           return ESP_ERR_NOT_FOUND;
+
+//         case MQTT_ERR_TIMEOUT:
+//           ESP_LOGE(TAG, "MQTT connection failed: Connection timeout");
+//           return ESP_ERR_TIMEOUT;
+
+//         case MQTT_ERR_REJECTED:
+//           ESP_LOGE(TAG,
+//                    "MQTT connection failed: Connection rejected by broker");
+//           return ESP_ERR_INVALID_STATE;
+
+//         default:
+//           ESP_LOGE(TAG, "MQTT connection failed with unknown error code: %d",
+//                    error_code);
+//           return ESP_FAIL;
+//         }
+//       }
+//     }
+//     ESP_LOGE(TAG, "MQTT connection failed with unspecified error: %s",
+//              response);
+//     return ESP_FAIL;
+//   }
+
+//   // Verify successful connection
+//   if (strstr(response, "OK") != NULL) {
+//     // Double check connection status
+//     ret = sim7080g_mqtt_get_broker_connection_status(sim7080g_handle,
+//                                                      &curr_status);
+//     if (ret == ESP_OK && curr_status != MQTT_STATUS_DISCONNECTED) {
+//       ESP_LOGI(TAG, "Successfully connected to MQTT broker");
+//       return ESP_OK;
+//     } else {
+//       ESP_LOGE(TAG, "Got OK but connection status check failed");
+//       return ESP_ERR_INVALID_STATE;
+//     }
+//   }
+
+//   ESP_LOGE(TAG, "Unexpected response from MQTT connect command: %s",
+//   response); return ESP_ERR_INVALID_RESPONSE;
+// }
+//
+
 esp_err_t
 sim7080g_mqtt_connect_to_broker(const sim7080g_handle_t *sim7080g_handle) {
   if (!sim7080g_handle) {
@@ -819,100 +934,147 @@ sim7080g_mqtt_connect_to_broker(const sim7080g_handle_t *sim7080g_handle) {
   esp_err_t ret =
       sim7080g_mqtt_get_broker_connection_status(sim7080g_handle, &curr_status);
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to check current connection status");
-    return ret;
+    ESP_LOGE(TAG,
+             "Failed to check current connection status before connect: %s",
+             esp_err_to_name(ret));
+    // Not returning here, will attempt connect anyway
   }
 
   if (curr_status != MQTT_STATUS_DISCONNECTED) {
-    ESP_LOGI(TAG, "MQTT broker already connected");
-    return ESP_OK;
+    ESP_LOGI(TAG,
+             "MQTT broker reported as not disconnected (%d). Forcing "
+             "disconnect first.",
+             curr_status);
+    // AT+SMDISC
+    char smdisc_response[AT_RESPONSE_MAX_LEN] = {0};
+    send_at_cmd(sim7080g_handle, &AT_SMDISC, AT_CMD_TYPE_EXECUTE, NULL,
+                smdisc_response, sizeof(smdisc_response), 5000);
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Give time for disconnect
   }
 
-  // Verify network broker connected before attempting MQTT connect
-  int pdpidx = 0;
-  int status;
-  char address[32];
-  ret = sim7080g_get_app_network_active(sim7080g_handle, pdpidx, &status,
-                                        address, sizeof(address));
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to get network active status");
-    return ret;
+  // Verify network bearer connected before attempting MQTT connect
+  // (This check is already in your modem_init sequence, but good to have here
+  // too)
+  int pdpidx = 0; // Assuming PDP context 0
+  int network_status;
+  char ip_address[32];
+  ret = sim7080g_get_app_network_active(
+      sim7080g_handle, pdpidx, &network_status, ip_address, sizeof(ip_address));
+  if (ret != ESP_OK || network_status <= 0) {
+    ESP_LOGE(
+        TAG,
+        "Network bearer not active. Cannot connect MQTT. Status: %d, Err: %s",
+        network_status, esp_err_to_name(ret));
+    return (ret == ESP_OK) ? ESP_FAIL : ret;
   }
-  if (status <= 0) {
-    ESP_LOGE(TAG, "Network bearer not connected");
-    return ESP_FAIL;
-  }
-
-  ESP_LOGI(TAG, "Attempting to connect to MQTT broker");
 
   char response[AT_RESPONSE_MAX_LEN] = {0};
+  char cmd_args[128];
+
+  // --- MQTTS Specific Additions ---
+  if (sim7080g_handle->mqtt_config.use_tls) {
+    ESP_LOGI(TAG_MQTTS,
+             "MQTTS enabled. Applying SSL configuration for MQTT connection.");
+
+    // Check clock sync - crucial for SSL certificate validation
+    ret = send_at_cmd(sim7080g_handle, &AT_CCLK, AT_CMD_TYPE_READ, NULL,
+                      response, sizeof(response), 5000);
+    if (ret == ESP_OK) {
+      ESP_LOGI(TAG_MQTTS, "Current modem time: %s",
+               response); // Response includes +CCLK: "yy/MM/dd,hh:mm:ss+/-zz"
+      // Basic check if time looks reasonable (e.g., not default like
+      // "80/01/06")
+      if (strstr(response, "80/01/06") != NULL ||
+          strstr(response, "00/00/00") != NULL) {
+        ESP_LOGW(TAG_MQTTS, "Modem time might not be synchronized. SSL "
+                            "handshake could fail. Ensure AT+CLTS=1 was set "
+                            "and modem rebooted or time synced via NTP.");
+      }
+    } else {
+      ESP_LOGW(TAG_MQTTS,
+               "Failed to query modem time (AT+CCLK?): %s. SSL handshake might "
+               "fail.",
+               esp_err_to_name(ret));
+    }
+
+    // AT+SMSSL=<index>,"<ca_list_file>"[,"<client_cert_file>"]
+    // <index> is ssl_context_index + 1, if context 0 is used for AT+CSSLCFG
+    // For server auth only, client_cert_file is empty string ""
+    uint8_t smssl_index = sim7080g_handle->mqtt_config.ssl_context_index + 1;
+    if (smssl_index == 0 ||
+        smssl_index > 6) { // AT+SMSSL index is 1-6 for SSL contexts 0-5
+      ESP_LOGE(TAG_MQTTS,
+               "Invalid AT+SMSSL index derived from SSL context index: %d",
+               sim7080g_handle->mqtt_config.ssl_context_index);
+      return ESP_ERR_INVALID_ARG;
+    }
+
+    snprintf(cmd_args, sizeof(cmd_args),
+             "%d,\"%s\",\"\"", // Empty client cert name for server-only auth
+             smssl_index,
+             sim7080g_handle->mqtt_config.ca_cert_filename_on_modem);
+
+    ESP_LOGI(TAG_MQTTS, "Setting MQTT SSL context: AT+SMSSL=%s", cmd_args);
+    ret = send_at_cmd(sim7080g_handle, &AT_SMSSL, AT_CMD_TYPE_WRITE, cmd_args,
+                      response, sizeof(response), 5000);
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG_MQTTS, "Failed to set MQTT SSL (AT+SMSSL): %s",
+               esp_err_to_name(ret));
+      return ret;
+    }
+    ESP_LOGI(TAG_MQTTS, "AT+SMSSL configured successfully.");
+  } else {
+    // Ensure SSL is disabled on the modem if not used, by setting AT+SMSSL=0
+    // This prevents previous SSL settings from interfering with non-SSL
+    // connections.
+    ESP_LOGI(TAG_MQTTS, "MQTTS not enabled. Ensuring AT+SMSSL=0.");
+    ret = send_at_cmd(sim7080g_handle, &AT_SMSSL, AT_CMD_TYPE_WRITE,
+                      "0,\"\",\"\"", // SMSSL index 0 means no SSL
+                      response, sizeof(response), 5000);
+    if (ret != ESP_OK) {
+      ESP_LOGW(TAG_MQTTS,
+               "Failed to explicitly disable MQTT SSL (AT+SMSSL=0): %s. This "
+               "might be okay.",
+               esp_err_to_name(ret));
+      // Continue, as this is a cleanup/prevention step.
+    }
+  }
+  // --- End MQTTS Specific Additions ---
+
+  ESP_LOGI(TAG, "Attempting to connect to MQTT broker (AT+SMCONN)...");
+  memset(response, 0, sizeof(response)); // Clear response buffer for AT+SMCONN
   ret = send_at_cmd(sim7080g_handle, &AT_SMCONN, AT_CMD_TYPE_EXECUTE, NULL,
                     response, sizeof(response),
-                    15000); // 15 second timeout for connection
+                    25000); // Increased timeout for MQTTS connection
 
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to send MQTT connect command");
+    ESP_LOGE(TAG, "Failed to send MQTT connect command (AT+SMCONN): %s",
+             esp_err_to_name(ret));
+    // AT+SMCONN failure often doesn't put "ERROR" in the immediate response
+    // buffer but rather relies on +CME ERROR or simply not getting "OK". The
+    // send_at_cmd should handle this by returning ESP_FAIL or ESP_ERR_TIMEOUT.
     return ret;
   }
 
-  // Check for error responses
-  if (strstr(response, "ERROR") != NULL) {
-    // Extract error code if present
-    char *error_start = strstr(response, "+CME ERROR:");
-    if (error_start != NULL) {
-      int error_code;
-      if (sscanf(error_start, "+CME ERROR: %d", &error_code) == 1) {
-        // Map error code to appropriate ESP error code and log details
-        switch (error_code) {
-        case MQTT_ERR_NETWORK:
-          ESP_LOGE(TAG, "MQTT connection failed: Network error");
-          return MQTT_ERR_NETWORK;
-
-        case MQTT_ERR_PROTOCOL:
-          ESP_LOGE(TAG, "MQTT connection failed: Protocol error");
-          return MQTT_ERR_PROTOCOL;
-
-        case MQTT_ERR_UNAVAILABLE:
-          ESP_LOGE(TAG, "MQTT connection failed: Broker unavailable");
-          return ESP_ERR_NOT_FOUND;
-
-        case MQTT_ERR_TIMEOUT:
-          ESP_LOGE(TAG, "MQTT connection failed: Connection timeout");
-          return ESP_ERR_TIMEOUT;
-
-        case MQTT_ERR_REJECTED:
-          ESP_LOGE(TAG,
-                   "MQTT connection failed: Connection rejected by broker");
-          return ESP_ERR_INVALID_STATE;
-
-        default:
-          ESP_LOGE(TAG, "MQTT connection failed with unknown error code: %d",
-                   error_code);
-          return ESP_FAIL;
-        }
-      }
-    }
-    ESP_LOGE(TAG, "MQTT connection failed with unspecified error: %s",
-             response);
-    return ESP_FAIL;
+  // AT+SMCONN usually just returns OK. The actual connection result might come
+  // as URC or needs to be checked with AT+SMSTATE. send_at_cmd checks for "OK".
+  // Let's re-check status after attempting connection.
+  vTaskDelay(
+      pdMS_TO_TICKS(2000)); // Give some time for connection to establish/fail
+  ret =
+      sim7080g_mqtt_get_broker_connection_status(sim7080g_handle, &curr_status);
+  if (ret == ESP_OK && curr_status != MQTT_STATUS_DISCONNECTED) {
+    ESP_LOGI(TAG, "Successfully connected to MQTT broker (status: %d).",
+             curr_status);
+    return ESP_OK;
+  } else {
+    ESP_LOGE(TAG,
+             "MQTT connection attempt failed or status check error. Final "
+             "Status: %d, CheckErr: %s",
+             curr_status, esp_err_to_name(ret));
+    return (ret == ESP_OK) ? ESP_FAIL : ret; // If status check was OK but not
+                                             // connected, return ESP_FAIL
   }
-
-  // Verify successful connection
-  if (strstr(response, "OK") != NULL) {
-    // Double check connection status
-    ret = sim7080g_mqtt_get_broker_connection_status(sim7080g_handle,
-                                                     &curr_status);
-    if (ret == ESP_OK && curr_status != MQTT_STATUS_DISCONNECTED) {
-      ESP_LOGI(TAG, "Successfully connected to MQTT broker");
-      return ESP_OK;
-    } else {
-      ESP_LOGE(TAG, "Got OK but connection status check failed");
-      return ESP_ERR_INVALID_STATE;
-    }
-  }
-
-  ESP_LOGE(TAG, "Unexpected response from MQTT connect command: %s", response);
-  return ESP_ERR_INVALID_RESPONSE;
 }
 
 esp_err_t sim7080g_mqtt_get_broker_connection_status(
@@ -1849,4 +2011,346 @@ bool sim7080g_test_uart_loopback(sim7080g_handle_t *sim7080g_handle) {
     ESP_LOGE(TAG, "UART loopback test failed!");
     return false;
   }
+}
+
+// Helper to wait for specific prompt like ">" or "DOWNLOAD"
+static esp_err_t sim7080g_wait_for_prompt(const sim7080g_handle_t *handle,
+                                          char *buffer, size_t buffer_len,
+                                          const char *prompt,
+                                          uint32_t timeout_ms) {
+  memset(buffer, 0, buffer_len);
+  // This is a simplified prompt wait. A more robust version might read
+  // byte-by-byte or handle intermediate lines better.
+  int bytes_read =
+      uart_read_bytes(handle->uart_config.port_num, (uint8_t *)buffer,
+                      buffer_len - 1, pdMS_TO_TICKS(timeout_ms));
+  if (bytes_read <= 0) {
+    ESP_LOGE(TAG, "Timeout or error waiting for prompt '%s'", prompt);
+    return ESP_ERR_TIMEOUT;
+  }
+  buffer[bytes_read] = '\0'; // Null-terminate
+  ESP_LOGD(TAG, "Prompt Wait Read: %s", buffer);
+  if (strstr(buffer, prompt) != NULL) {
+    return ESP_OK;
+  }
+  ESP_LOGE(TAG, "Expected prompt '%s' not found in response: %s", prompt,
+           buffer);
+  return ESP_FAIL;
+}
+
+esp_err_t
+sim7080g_fs_upload_text_file(const sim7080g_handle_t *handle,
+                             uint8_t fs_index, // 3 for /customer/ usually
+                             const char *filename_on_modem,
+                             const char *file_data,
+                             uint32_t timeout_ms_file_op) {
+  if (!handle || !filename_on_modem || !file_data) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  ESP_LOGI(TAG_MQTTS, "Uploading file '%s' to FS index %d", filename_on_modem,
+           fs_index);
+
+  char cmd_buffer[128];
+  char response_buffer[AT_RESPONSE_MAX_LEN];
+  esp_err_t ret;
+
+  // 1. Initialize filesystem access
+  ret = send_at_cmd(handle, &AT_CFSINIT, AT_CMD_TYPE_EXECUTE, NULL,
+                    response_buffer, sizeof(response_buffer), 5000);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG_MQTTS, "AT+CFSINIT failed: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  // 2. Write the file using AT+CFSWFILE
+  // AT+CFSWFILE=<index>,<filename>,<mode>,<filesize>,<input time>
+  // mode 0: overwrite/create
+  size_t file_len = strlen(file_data);
+  if (file_len == 0 ||
+      file_len > 10239) { // As per manual, <filesize> should be less than 10240
+    ESP_LOGE(TAG_MQTTS, "File data length (%zu) is invalid for AT+CFSWFILE.",
+             file_len);
+    send_at_cmd(handle, &AT_CFSTERM, AT_CMD_TYPE_EXECUTE, NULL, response_buffer,
+                sizeof(response_buffer), 5000); // Attempt to terminate
+    return ESP_ERR_INVALID_SIZE;
+  }
+
+  // The timeout_ms_file_op is for the modem to wait for data after DOWNLOAD
+  // prompt. Let's use a fixed reasonable internal timeout for the AT command
+  // itself.
+  uint32_t cmd_timeout = 5000; // Timeout for the AT+CFSWFILE command itself
+  uint32_t data_input_timeout =
+      timeout_ms_file_op > 10000
+          ? 10000
+          : timeout_ms_file_op; // Max 10000ms as per manual
+
+  snprintf(cmd_buffer, sizeof(cmd_buffer), "%d,\"%s\",0,%zu,%lu", fs_index,
+           filename_on_modem, file_len, data_input_timeout);
+
+  // Send AT+CFSWFILE command, but don't use send_at_cmd directly as it expects
+  // OK/ERROR immediately. We need to wait for "DOWNLOAD" prompt.
+  char full_at_cmd[AT_CMD_MAX_LEN];
+  snprintf(full_at_cmd, sizeof(full_at_cmd), "%s%s\r\n",
+           AT_CFSWFILE.write.cmd_string, cmd_buffer);
+  ESP_LOGD(TAG_MQTTS, "Sending: %s", full_at_cmd);
+  uart_flush_input(handle->uart_config.port_num);
+  uart_write_bytes(handle->uart_config.port_num, full_at_cmd,
+                   strlen(full_at_cmd));
+
+  // Wait for "DOWNLOAD" prompt
+  ret =
+      sim7080g_wait_for_prompt(handle, response_buffer, sizeof(response_buffer),
+                               "DOWNLOAD", cmd_timeout);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG_MQTTS,
+             "Did not receive DOWNLOAD prompt for AT+CFSWFILE. Response: %s",
+             response_buffer);
+    send_at_cmd(handle, &AT_CFSTERM, AT_CMD_TYPE_EXECUTE, NULL, response_buffer,
+                sizeof(response_buffer), 5000);
+    return ret;
+  }
+
+  // Send the file data
+  ESP_LOGD(TAG_MQTTS, "Sending file data (%zu bytes)...", file_len);
+  vTaskDelay(pdMS_TO_TICKS(100)); // Small delay before sending data
+  uart_write_bytes(handle->uart_config.port_num, file_data, file_len);
+
+  // Wait for final OK/ERROR after data transfer
+  // The send_at_cmd function is not suitable here as it resends the command.
+  // We need to read the final result of the data write.
+  memset(response_buffer, 0, sizeof(response_buffer));
+  int bytes_read = uart_read_bytes(
+      handle->uart_config.port_num, (uint8_t *)response_buffer,
+      sizeof(response_buffer) - 1,
+      pdMS_TO_TICKS(data_input_timeout + 2000)); // Timeout for data write + OK
+
+  if (bytes_read <= 0) {
+    ESP_LOGE(TAG_MQTTS,
+             "Timeout waiting for OK after sending file data for AT+CFSWFILE.");
+    ret = ESP_ERR_TIMEOUT;
+  } else {
+    response_buffer[bytes_read] = '\0';
+    ESP_LOGD(TAG_MQTTS, "Response after file data: %s", response_buffer);
+    if (strstr(response_buffer, "OK") != NULL) {
+      ESP_LOGI(TAG_MQTTS, "File '%s' uploaded successfully.",
+               filename_on_modem);
+      ret = ESP_OK;
+    } else {
+      ESP_LOGE(TAG_MQTTS, "Failed to upload file '%s'. Response: %s",
+               filename_on_modem, response_buffer);
+      ret = ESP_FAIL;
+    }
+  }
+
+  // 3. Terminate filesystem access
+  esp_err_t term_ret =
+      send_at_cmd(handle, &AT_CFSTERM, AT_CMD_TYPE_EXECUTE, NULL,
+                  response_buffer, sizeof(response_buffer), 5000);
+  if (term_ret != ESP_OK) {
+    ESP_LOGE(TAG_MQTTS, "AT+CFSTERM failed: %s", esp_err_to_name(term_ret));
+    if (ret == ESP_OK)
+      ret = term_ret; // Preserve original error if one occurred
+  }
+  return ret;
+}
+
+esp_err_t sim7080g_mqtts_configure_ssl(const sim7080g_handle_t *handle,
+                                       const char *ca_cert_pem_data) {
+  if (!handle || !ca_cert_pem_data || !handle->mqtt_config.use_tls) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  ESP_LOGI(TAG_MQTTS, "Configuring SSL context %d for MQTTS.",
+           handle->mqtt_config.ssl_context_index);
+
+  char cmd_args[128];
+  char response_buffer[AT_RESPONSE_MAX_LEN];
+  esp_err_t ret;
+
+  // Step 1: Upload CA certificate to modem's filesystem
+  // Using FS index 3 for "/customer/" as per MQTT(S) App Note example
+  ret = sim7080g_fs_upload_text_file(
+      handle, 3, handle->mqtt_config.ca_cert_filename_on_modem,
+      ca_cert_pem_data, 10000); // 10s timeout for file operation
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG_MQTTS, "Failed to upload CA certificate '%s': %s",
+             handle->mqtt_config.ca_cert_filename_on_modem,
+             esp_err_to_name(ret));
+    return ret;
+  }
+
+  // Step 2: Configure SSL version for the context (e.g., TLS 1.2)
+  // AT+CSSLCFG="SSLVERSION",<ctxindex>,<sslversion> (3 for TLS 1.2)
+  snprintf(cmd_args, sizeof(cmd_args), "\"SSLVERSION\",%d,3",
+           handle->mqtt_config.ssl_context_index);
+  ret = send_at_cmd(handle, &AT_CSSLCFG, AT_CMD_TYPE_WRITE, cmd_args,
+                    response_buffer, sizeof(response_buffer), 5000);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG_MQTTS, "Failed to set SSL version for context %d: %s",
+             handle->mqtt_config.ssl_context_index, esp_err_to_name(ret));
+    return ret;
+  }
+  ESP_LOGI(TAG_MQTTS, "SSL version set to TLS 1.2 for context %d.",
+           handle->mqtt_config.ssl_context_index);
+
+  // Step 3: Convert/Register the CA certificate with the SSL context
+  // AT+CSSLCFG="CONVERT",<ssltype>,<cname>
+  // <ssltype> 2 for CA list
+  snprintf(cmd_args, sizeof(cmd_args), "\"CONVERT\",2,\"%s\"",
+           handle->mqtt_config.ca_cert_filename_on_modem);
+  ret = send_at_cmd(handle, &AT_CSSLCFG, AT_CMD_TYPE_WRITE, cmd_args,
+                    response_buffer, sizeof(response_buffer),
+                    10000); // Longer timeout for cert conversion
+  if (ret != ESP_OK) {
+    ESP_LOGE(
+        TAG_MQTTS,
+        "Failed to convert/register CA certificate '%s' for context %d: %s",
+        handle->mqtt_config.ca_cert_filename_on_modem,
+        handle->mqtt_config.ssl_context_index, esp_err_to_name(ret));
+    return ret;
+  }
+  ESP_LOGI(TAG_MQTTS, "CA certificate '%s' configured for SSL context %d.",
+           handle->mqtt_config.ca_cert_filename_on_modem,
+           handle->mqtt_config.ssl_context_index);
+
+  // Note: If using client certificate authentication, you would add steps here
+  // to:
+  // 1. Upload client.crt and client.key using sim7080g_fs_upload_text_file
+  // 2. Call AT+CSSLCFG="CONVERT",1,"client.crt_on_modem","client.key_on_modem"
+
+  // Optional: Configure other SSL parameters if needed (e.g., cipher suites,
+  // ignore RTC time) via AT+CSSLCFG. For Let's Encrypt, typically defaults are
+  // fine for server auth.
+
+  return ESP_OK;
+}
+
+// Function to get the current epoch time
+esp_err_t sim7080g_get_epoch_time_utc(const sim7080g_handle_t *handle,
+                                      time_t *epoch_time_utc) {
+  if (!handle || !epoch_time_utc) {
+    ESP_LOGE(TAG, "sim7080g_get_epoch_time_utc: Invalid parameters");
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (!handle->uart_initialized) {
+    ESP_LOGE(TAG, "sim7080g_get_epoch_time_utc: UART not initialized");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  char response[AT_RESPONSE_MAX_LEN] = {0};
+  esp_err_t ret;
+
+  ESP_LOGD(TAG, "Querying modem time with AT+CCLK?");
+  ret = send_at_cmd(handle, &AT_CCLK, AT_CMD_TYPE_READ, NULL, response,
+                    sizeof(response), 5000);
+
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to get time from modem (AT+CCLK?): %s",
+             esp_err_to_name(ret));
+    return ret;
+  }
+
+  // Expected response: +CCLK: "yy/MM/dd,hh:mm:ss±zz"
+  // Example: +CCLK: "25/05/13,10:58:08-16"
+  char *cclk_payload = strstr(response, "+CCLK: \"");
+  if (!cclk_payload) {
+    ESP_LOGE(TAG, "Invalid AT+CCLK response format: %s", response);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+  cclk_payload += strlen("+CCLK: \""); // Move pointer past the prefix
+
+  int yy, MM, dd, hh, mm, ss, zz_quarters;
+  // Parse the time string
+  int parsed_count = sscanf(cclk_payload, "%d/%d/%d,%d:%d:%d%d", &yy, &MM, &dd,
+                            &hh, &mm, &ss, &zz_quarters);
+
+  if (parsed_count != 7) {
+    ESP_LOGE(
+        TAG,
+        "Failed to parse all fields from CCLK response: %s (parsed %d fields)",
+        cclk_payload, parsed_count);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  ESP_LOGD(TAG,
+           "Parsed CCLK: yy=%02d, MM=%02d, dd=%02d, hh=%02d, mm=%02d, ss=%02d, "
+           "zz_quarters=%d",
+           yy, MM, dd, hh, mm, ss, zz_quarters);
+
+  struct tm tminfo = {0}; // Initialize all fields to 0
+  tminfo.tm_year =
+      yy + 2000 -
+      1900; // Modem year is since 2000, struct tm year is since 1900
+  tminfo.tm_mon = MM - 1; // Month is 0-11 for struct tm
+  tminfo.tm_mday = dd;
+  tminfo.tm_hour = hh;
+  tminfo.tm_min = mm;
+  tminfo.tm_sec = ss;
+  tminfo.tm_isdst = -1; // Let mktime/timegm determine DST or assume not
+                        // applicable for UTC conversion
+
+  // Calculate the total offset in seconds from GMT/UTC
+  // zz_quarters is the offset in 15-minute intervals
+  long total_offset_seconds = (long)zz_quarters * 15 * 60;
+
+  // The time from AT+CCLK is local to the modem's configured/network timezone.
+  // To get UTC epoch, we need to convert this local time to UTC.
+  // If local time is hh:mm:ss and offset is +zz (meaning local is ahead of
+  // UTC), then UTC = local_time - offset. If local time is hh:mm:ss and offset
+  // is -zz (meaning local is behind UTC), then UTC = local_time + abs(offset) =
+  // local_time - offset (since offset is negative). So, UTC = local_time -
+  // total_offset_seconds.
+
+  // Create a time_t from the parsed local time components first
+  // Note: mktime interprets struct tm as local system time.
+  // This can be problematic if the ESP32's system timezone is not aligned or
+  // known. For robust UTC epoch, timegm() is preferred. If not available,
+  // manual calc or careful mktime usage.
+
+  // Approach 1: Assume struct tm is local, convert to epoch, then adjust to UTC
+  // epoch This is simpler if timegm is not available, but depends on how mktime
+  // is configured on ESP32
+  time_t local_time_as_epoch = mktime(&tminfo);
+  if (local_time_as_epoch == -1) {
+    ESP_LOGE(TAG, "mktime failed to convert parsed time. Date/time values "
+                  "might be out of range.");
+    // This can happen if, for example, network time isn't set and CCLK returns
+    // default "80/01/06..." or if parsed values are nonsensical.
+    if (yy < 70) { // mktime typically handles years from 1970. Modem base year
+                   // is 2000.
+      ESP_LOGW(TAG,
+               "Modem year (20%02d) likely pre-epoch or invalid for mktime "
+               "after conversion.",
+               yy);
+    }
+    return ESP_FAIL;
+  }
+
+  *epoch_time_utc = local_time_as_epoch - total_offset_seconds;
+
+  // Approach 2 (Preferred if timegm is available and tminfo can be set to UTC
+  // first): Adjust tminfo to represent UTC BEFORE calling a conversion function
+  // time_t temp_epoch_for_adjustment = mktime(&tminfo); // get epoch for local
+  // tminfo temp_epoch_for_adjustment -= total_offset_seconds; // adjust to UTC
+  // epoch struct tm *utc_tm = gmtime_r(&temp_epoch_for_adjustment, &tminfo); //
+  // convert epoch back to UTC tm struct if (utc_tm) {
+  //    *epoch_time_utc = timegm(&tminfo); // timegm expects struct tm to be UTC
+  //    if (*epoch_time_utc == -1) {
+  //        ESP_LOGE(TAG, "timegm failed"); return ESP_FAIL;
+  //    }
+  // } else {
+  //    ESP_LOGE(TAG, "gmtime_r failed"); return ESP_FAIL;
+  // }
+  // For simplicity, the first approach (adjusting epoch from mktime) is used
+  // above. Ensure your system's timezone doesn't double-apply offsets if mktime
+  // is timezone-aware and total_offset_seconds also accounts for it. Best is if
+  // mktime assumes input is UTC or if the ESP32 system TZ is set to UTC.
+
+  ESP_LOGD(TAG,
+           "Modem local time: %04d-%02d-%02d %02d:%02d:%02d, offset_sec: %ld. "
+           "Calculated UTC Epoch: %lld",
+           tminfo.tm_year + 1900, tminfo.tm_mon + 1, tminfo.tm_mday,
+           tminfo.tm_hour, tminfo.tm_min, tminfo.tm_sec, total_offset_seconds,
+           *epoch_time_utc);
+
+  return ESP_OK;
 }

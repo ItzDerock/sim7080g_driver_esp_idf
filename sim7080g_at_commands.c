@@ -153,6 +153,50 @@ const at_cmd_t AT_CEREG = {
     .write = {WRITE_CMD("AT+CEREG"), "OK"},
     .execute = {0}};
 
+const at_cmd_t AT_CFSINIT = {
+    .name = "AT+CFSINIT",
+    .description = "Initialize Filesystem Access",
+    .test = {0}, .read = {0}, .write = {0},
+    .execute = {EXECUTE_CMD("AT+CFSINIT"), "OK"}};
+
+const at_cmd_t AT_CFSWFILE = {
+    .name = "AT+CFSWFILE",
+    .description = "Write File to Filesystem",
+    .test = {TEST_CMD("AT+CFSWFILE"), "+CFSWFILE:"}, // Example response
+    .read = {0},
+    .write = {WRITE_CMD("AT+CFSWFILE"), "DOWNLOAD"}, // Expects "DOWNLOAD" then data
+    .execute = {0}};
+
+const at_cmd_t AT_CFSTERM = {
+    .name = "AT+CFSTERM",
+    .description = "Terminate Filesystem Access",
+    .test = {0}, .read = {0}, .write = {0},
+    .execute = {EXECUTE_CMD("AT+CFSTERM"), "OK"}};
+
+const at_cmd_t AT_CSSLCFG = {
+    .name = "AT+CSSLCFG",
+    .description = "Configure SSL Parameters",
+    .test = {TEST_CMD("AT+CSSLCFG"), "+CSSLCFG:"}, // Example response
+    .read = {READ_CMD("AT+CSSLCFG"), "+CSSLCFG:"},
+    .write = {WRITE_CMD("AT+CSSLCFG"), "OK"},
+    .execute = {0}};
+
+const at_cmd_t AT_SMSSL = {
+    .name = "AT+SMSSL",
+    .description = "Set MQTT SSL/TLS Mode and Certificates",
+    .test = {TEST_CMD("AT+SMSSL"), "+SMSSL:"}, // Example response
+    .read = {READ_CMD("AT+SMSSL"), "+SMSSL:"},
+    .write = {WRITE_CMD("AT+SMSSL"), "OK"},
+    .execute = {0}};
+
+const at_cmd_t AT_CCLK = {
+    .name = "AT+CCLK",
+    .description = "Clock - Get current time",
+    .test = {TEST_CMD("AT+CCLK"), "OK"},
+    .read = {READ_CMD("AT+CCLK"), "+CCLK:"},
+    .write = {WRITE_CMD("AT+CCLK"), "OK"},
+    .execute = {0}};
+
 // TODO - Implement this if its found relevant later to check  transport layer connection
 //  const at_cmd_t AT_CASTATE = {
 //      .name = "AT+CASTATE",
