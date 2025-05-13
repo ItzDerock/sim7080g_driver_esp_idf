@@ -308,12 +308,141 @@ extern const at_cmd_t AT_CEREG;
 /// @brief Query TCP/UDP Connection Status - Check current connection status
 extern const at_cmd_t AT_CASTATE;
 
+/// @brief Get Flash Data Buffer
+/// @details This command is used to get the flash data buffer.
+/// @return On success:
+///  - OK
+/// @return On failure:
+///  - ERROR
+///  - +CME ERROR: <err>
 extern const at_cmd_t AT_CFSINIT;
+
+/// @brief Write File to the Flash Buffer Allocated by CFSINIT
+/// @details This command is used to write a file to the flash buffer allocated
+/// by AT+CFSINIT.
+/// @param index Directory of AP filesystem (0: "/custapp/", 1: "/fota/", 2:
+/// "/datatx/", 3: "/customer/")
+/// @param file_name File name (max 230 chars)
+/// @param mode Write mode (0: Overwrite if exists, 1: Append if exists)
+/// @param file_size File size (max 10240 bytes)
+/// @param input_time Time in ms to input file data (100-10000 ms)
+/// @return On success:
+///  - OK
+/// @return On failure:
+///  - ERROR
+///  - +CME ERROR: <err>
 extern const at_cmd_t AT_CFSWFILE;
+
+/// @brief Free the Flash Buffer Allocated by CFSINIT
+/// @details This command is used to free the flash buffer allocated by
+/// AT+CFSINIT.
+/// @return On success:
+///  - OK
+/// @return On failure:
+///  - ERROR
+///  - +CME ERROR: <err>
 extern const at_cmd_t AT_CFSTERM;
+
+/// @brief Configure SSL Parameters of a Context Identifier
+/// @details This command is used to configure various SSL parameters for a
+/// specific context.
+/// @param param_tag The SSL parameter to configure (e.g., "SSLVERSION",
+/// "CIPHERSUITE", "IGNORERTCTIME", "PROTOCOL", "SNI", "CTXINDEX",
+/// "MAXFRAGLENDISABLE", "CONVERT")
+/// @param ctxindex Context identifier (0-5)
+/// @param ... Additional parameters depending on param_tag
+/// @return On success:
+///  - OK
+/// @return On failure:
+///  - +CME ERROR: <err>
 extern const at_cmd_t AT_CSSLCFG;
+
+/// @brief Select SSL Configure for MQTT
+/// @details This command is used to select the SSL configuration for an MQTT
+/// connection.
+/// @param index SSL status (0: No SSL, 1-6: Corresponds to AT+CSSLCFG ctxindex
+/// 0-5)
+/// @param ca_list CA_LIST file name (max 20 bytes)
+/// @param cert_name CERT_NAME file name (max 20 bytes)
+/// @return On success:
+///  - OK
+/// @return On failure:
+///  - ERROR
 extern const at_cmd_t AT_SMSSL;
+
+/// @brief Clock
+/// @details This command is used to set or query the real-time clock of the
+/// module.
+/// @param time String in format "yy/MM/dd,hh:mm:ss±zz" (optional for query)
+/// @return On success (query):
+///  - +CCLK: <time>
+///  - OK
+/// @return On success (set):
+///  - OK
+/// @return On failure:
+///  - +CME ERROR: <err>
+/// @note Time zone is auto saved. [cite: 358]
 extern const at_cmd_t AT_CCLK;
+
+/// @brief Get Local Timestamp
+/// @details This command is used to enable or disable the automatic local
+/// timestamp update from the network. When enabled, the module can receive time
+/// and time zone updates from the network.
+/// @param mode
+///  - 0: Disable
+///  - 1: Enable
+/// @return On success (query):
+///  - +CLTS: <mode>
+///  - OK
+/// @return On success (set):
+///  - OK
+/// @return On failure:
+///  - ERROR
+/// @note URCs like *PSNWID, *PSUTTZ, +CTZV, DST may be reported when enabled.
+/// @note This setting is saved and takes effect after reboot
+/// (AUTO_SAVE_REBOOT).
+extern const at_cmd_t AT_CLTS;
+
+/// @brief Set GPRS Bearer Profile's ID for NTP
+/// @details This command sets the GPRS bearer profile identifier (PDP context)
+/// to be used for NTP (Network Time Protocol) operations.
+/// @param cid Bearer profile identifier (0-3, corresponds to AT+CNACT <pdpidx>)
+/// @return On success:
+///  - OK
+/// @return On failure:
+///  - ERROR
+extern const at_cmd_t AT_CNTPCID;
+
+/// @brief Synchronize UTC Time using NTP
+/// @details This command is used to synchronize the module's UTC time with an
+/// NTP server. It can also be used to configure the NTP server address, time
+/// zone, and synchronization mode.
+/// @param ntp_server NTP server URL (string, max 64 chars)
+/// @param time_zone Local time zone (-47 to 48, representing quarter-hour
+/// offsets from GMT) (optional)
+/// @param cid Bearer profile identifier (0-3, from AT+CNACT) (optional)
+/// @param mode Synchronization and output mode (optional):
+///  - 0: Set UTC to local time only
+///  - 1: Output UTC time to AT port only
+///  - 2: Set UTC to local time and output UTC time to AT port
+/// @return On execution success:
+///  - OK
+///  - +CNTP: <code>[,<time>]
+/// @return On configuration success:
+///  - OK
+/// @return On failure:
+///  - ERROR
+/// @note After successful synchronization, AT+CCLK can be used to query the
+/// local time.
+extern const at_cmd_t AT_CNTP;
+
+/// @brief Reboot Module
+/// @details This command is used to reboot the module.
+/// @return On success:
+///  - OK
+/// @return On failure:
+///  - +CME ERROR: <err>
+extern const at_cmd_t AT_CREBOOT;
 
 // TODO - AT+CGSN - request product serial number ID
 // TODO - AT+CGMI - request manf id

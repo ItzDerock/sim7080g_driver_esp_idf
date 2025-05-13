@@ -263,6 +263,51 @@ esp_err_t sim7080g_mqtts_configure_ssl(const sim7080g_handle_t *handle,
 esp_err_t sim7080g_get_epoch_time_utc(const sim7080g_handle_t *handle,
                                       time_t *epoch_time_utc);
 
+/**
+ * @brief Synchronizes the SIM7080G module's Real-Time Clock (RTC).
+ *
+ * This function attempts to synchronize the modem's time using two methods in
+ * order:
+ * 1. Network Time Synchronization (NITZ) via AT+CLTS:
+ * - Enables AT+CLTS=1.
+ * - Reboots the module using sim7080g_cycle_cfun() as CLTS changes often
+ * require a reboot.
+ * - Waits for a period to allow network re-registration.
+ * - Checks AT+CCLK?. If the time is valid (not the default "80/01/06") and
+ * obtained, the function returns successfully.
+ * 2. NTP (Network Time Protocol) Synchronization via AT+CNTP:
+ * - This is attempted if NITZ fails or is skipped.
+ * - Verifies that a network bearer (PDP context) is active.
+ * - Sets the NTP bearer profile ID using AT+CNTPCID.
+ * - Configures AT+CNTP with a default NTP server (e.g., "pool.ntp.org"),
+ * UTC timezone (0 offset), the active PDP context, and mode 2 (update RTC &
+ * output time).
+ * - Sends the AT+CNTP execute command to initiate synchronization.
+ * - Polls AT+CCLK? for a specified duration to check if the time has been
+ * updated, as the actual NTP result (+CNTP: 1) is an Unsolicited Result Code
+ * (URC) which is not directly handled by this function's send_at_cmd.
+ *
+ * @note It is crucial that the modem is connected to the network bearer
+ * (e.g., GPRS/LTE) before attempting NTP synchronization.
+ * @note If AT+CLTS is used and causes a reboot, the calling application is
+ * responsible for ensuring the modem re-establishes its network connection
+ * before this function proceeds to check CCLK or attempt NTP. The current
+ * implementation includes a placeholder delay for this.
+ * @note For robust NTP synchronization, handling the "+CNTP: 1" URC would be
+ * more reliable than polling AT+CCLK?.
+ * @note This function is essential for operations requiring accurate time, such
+ * as SSL/TLS certificate validation for MQTTS.
+ *
+ * @param handle Pointer to the initialized sim7080g_handle_t structure.
+ * @return esp_err_t
+ * - ESP_OK if time synchronization was successful (either via NITZ or NTP).
+ * - ESP_FAIL if both methods fail or a critical error occurs.
+ * - ESP_ERR_INVALID_ARG if the handle is NULL.
+ * - ESP_ERR_INVALID_STATE if the network bearer is not active for NTP.
+ * - Other esp_err_t codes for specific AT command failures or timeouts.
+ */
+esp_err_t sim7080g_sync_time(const sim7080g_handle_t *handle);
+
 #ifdef __cplusplus
 }
 #endif

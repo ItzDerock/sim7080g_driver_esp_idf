@@ -1,3 +1,4 @@
+// clang-format off
 #include <string.h>
 #include <stdio.h>
 #include "sim7080g_at_commands.h"
@@ -196,6 +197,42 @@ const at_cmd_t AT_CCLK = {
     .read = {READ_CMD("AT+CCLK"), "+CCLK:"},
     .write = {WRITE_CMD("AT+CCLK"), "OK"},
     .execute = {0}};
+
+const at_cmd_t AT_CLTS = {
+    .name = "AT+CLTS",
+    .description = "Get Local Timestamp from Network",
+    .test = {TEST_CMD("AT+CLTS"), "+CLTS: \"yy/MM/dd,hh:mm:ss+/-zz\""},
+    .read = {READ_CMD("AT+CLTS"), "+CLTS: %d"}, // Reads current mode (0 or 1)
+    .write = {WRITE_CMD("AT+CLTS"), "OK"},
+    .execute = {0}
+};
+
+const at_cmd_t AT_CNTPCID = {
+    .name = "AT+CNTPCID",
+    .description = "Set Bearer Profile ID for NTP",
+    .test = {TEST_CMD("AT+CNTPCID"), "+CNTPCID: (0-3)"}, // Example, check your manual
+    .read = {READ_CMD("AT+CNTPCID"), "+CNTPCID: %d"},
+    .write = {WRITE_CMD("AT+CNTPCID"), "OK"},
+    .execute = {0}
+};
+
+const at_cmd_t AT_CNTP = {
+    .name = "AT+CNTP",
+    .description = "Synchronize Network Time Protocol",
+    .test = {TEST_CMD("AT+CNTP"), "+CNTP: (len_server),(tz_range),(cid_range),(mode_range)"}, // Example
+    .read = {READ_CMD("AT+CNTP"), "+CNTP: \"%[^\"]\",%d,%d,%d"}, // server, tz, cid, mode
+    .write = {WRITE_CMD("AT+CNTP"), "OK"}, // Write sets parameters, OK is immediate
+    .execute = {EXECUTE_CMD("AT+CNTP"), "OK"} // Execute initiates sync, expect URC +CNTP: <code>
+};
+
+const at_cmd_t AT_CREBOOT = {
+    .name = "AT+CREBOOT",
+    .description = "Reboot Module",
+    .test = {0},
+    .read = {0},
+    .write = {0},
+    .execute = {EXECUTE_CMD("AT+CREBOOT"), "OK"} // Modem reboots, "OK" might be received before full reboot
+};
 
 // TODO - Implement this if its found relevant later to check  transport layer connection
 //  const at_cmd_t AT_CASTATE = {

@@ -973,8 +973,26 @@ sim7080g_mqtt_connect_to_broker(const sim7080g_handle_t *sim7080g_handle) {
 
   // --- MQTTS Specific Additions ---
   if (sim7080g_handle->mqtt_config.use_tls) {
-    ESP_LOGI(TAG_MQTTS,
-             "MQTTS enabled. Applying SSL configuration for MQTT connection.");
+    ESP_LOGI(TAG_MQTTS, "MQTTS enabled. Ensuring time is synchronized.");
+    // Check time
+    char cclk_resp[AT_RESPONSE_MAX_LEN] = {0};
+    ret = send_at_cmd(sim7080g_handle, &AT_CCLK, AT_CMD_TYPE_READ, NULL,
+                      cclk_resp, sizeof(cclk_resp), 5000);
+    if (ret != ESP_OK || strstr(cclk_resp, "80/01/06") != NULL ||
+        strstr(cclk_resp, "00/00/00") != NULL) {
+      ESP_LOGW(TAG_MQTTS, "Modem time not synchronized. Attempting sync...");
+      ret = sim7080g_sync_time(sim7080g_handle);
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG_MQTTS,
+                 "Failed to synchronize time. SSL handshake may fail.");
+        // return ret; // Decide if this is a fatal error for MQTT connection
+      }
+    } else {
+      ESP_LOGI(TAG_MQTTS, "Modem time appears to be synchronized: %s",
+               cclk_resp);
+    }
+
+    ESP_LOGI(TAG_MQTTS, "Applying SSL configuration for MQTT connection.");
 
     // Check clock sync - crucial for SSL certificate validation
     ret = send_at_cmd(sim7080g_handle, &AT_CCLK, AT_CMD_TYPE_READ, NULL,
@@ -2353,4 +2371,137 @@ esp_err_t sim7080g_get_epoch_time_utc(const sim7080g_handle_t *handle,
            *epoch_time_utc);
 
   return ESP_OK;
+}
+
+esp_err_t sim7080g_sync_time(const sim7080g_handle_t *handle) {
+  esp_err_t ret;
+  char response[AT_RESPONSE_MAX_LEN] = {0};
+  char cclk_check_response[AT_RESPONSE_MAX_LEN] = {0};
+
+  ESP_LOGI(TAG, "Attempting to synchronize modem time...");
+
+  // --- Try Network Time (AT+CLTS) ---
+  ESP_LOGI(TAG, "Step 1: Enabling Network Time Synchronization (AT+CLTS=1)");
+  ret = send_at_cmd(handle, &AT_CLTS, AT_CMD_TYPE_WRITE, "1", response,
+                    sizeof(response), 5000);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to enable AT+CLTS=1: %s", esp_err_to_name(ret));
+    // Not returning error immediately, will try NTP
+  } else {
+    ESP_LOGI(TAG, "AT+CLTS=1 successful. Rebooting module to apply...");
+    // It's crucial to reboot for CLTS to take effect as per documentation
+    // Assuming sim7080g_cycle_cfun correctly reboots and waits.
+    // OR use AT+CREBOOT if defined and preferred.
+    ret = sim7080g_cycle_cfun(handle); // Or your preferred reboot function
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to reboot module after AT+CLTS: %s",
+               esp_err_to_name(ret));
+      // Proceed to NTP even if reboot fails, but log it.
+    } else {
+      ESP_LOGI(TAG, "Module rebooted. Waiting for network registration...");
+      // IMPORTANT: After reboot, the application must ensure the modem
+      // re-connects to the network bearer before checking time or attempting
+      // NTP. This might involve re-running parts of your
+      // sim7080g_connect_to_network_bearer() or having a robust network
+      // monitoring and reconnection logic. For this example, we'll assume the
+      // caller handles re-connection post-reboot and we add a delay here for
+      // demonstration.
+      vTaskDelay(pdMS_TO_TICKS(30000));
+
+      ESP_LOGI(TAG, "Checking time via AT+CCLK after CLTS and reboot attempt.");
+      ret = send_at_cmd(handle, &AT_CCLK, AT_CMD_TYPE_READ, NULL,
+                        cclk_check_response, sizeof(cclk_check_response), 5000);
+      if (ret == ESP_OK && strstr(cclk_check_response, "+CCLK: \"") != NULL &&
+          strstr(cclk_check_response, "80/01/06") == NULL) {
+        ESP_LOGI(TAG, "Time synchronized via network (AT+CLTS): %s",
+                 cclk_check_response);
+        return ESP_OK; // Time successfully synced via network
+      } else {
+        ESP_LOGW(TAG,
+                 "Network time not available or still default after CLTS. "
+                 "Response: %s",
+                 cclk_check_response);
+      }
+    }
+  }
+
+  // --- Try NTP Synchronization (AT+CNTP) ---
+  ESP_LOGI(TAG, "Step 2: Attempting NTP Synchronization (AT+CNTP)");
+
+  // Ensure network is active (should be handled by your connection logic)
+  int pdpidx = 0; // Assuming PDP context 0
+  int network_status;
+  char ip_address[32];
+  ret = sim7080g_get_app_network_active(handle, pdpidx, &network_status,
+                                        ip_address, sizeof(ip_address));
+  if (ret != ESP_OK || network_status <= 0) {
+    ESP_LOGE(TAG,
+             "Network bearer not active. Cannot proceed with NTP. Status: %d, "
+             "Err: %s",
+             network_status, esp_err_to_name(ret));
+    return (ret == ESP_OK) ? ESP_FAIL : ret;
+  }
+
+  ESP_LOGI(TAG, "Setting NTP CID (AT+CNTPCID)");
+  char ntp_args[64];
+  snprintf(ntp_args, sizeof(ntp_args), "%d",
+           pdpidx); // Use the active PDP index
+  ret = send_at_cmd(handle, &AT_CNTPCID, AT_CMD_TYPE_WRITE, ntp_args, response,
+                    sizeof(response), 5000);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set AT+CNTPCID: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  // Configure NTP server and initiate sync
+  // AT+CNTP="<server_url>",<timezone_offset_quarters>[,<cid>][,<mode>]
+  // Example: use "pool.ntp.org", UTC (0 offset), pdp 0, mode 2 (set local &
+  // output) The AT command manual pg 311 shows: AT+CNTP="202.120.2.101",32,0,2
+  // (for GMT+8) For UTC (0 offset from GMT), timezone_offset_quarters = 0
+  ESP_LOGI(TAG, "Configuring and starting NTP sync (AT+CNTP)");
+  snprintf(ntp_args, sizeof(ntp_args), "\"pool.ntp.org\",0,%d,2", pdpidx);
+  ret = send_at_cmd(handle, &AT_CNTP, AT_CMD_TYPE_WRITE, ntp_args, response,
+                    sizeof(response), 5000);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to send AT+CNTP configuration: %s",
+             esp_err_to_name(ret));
+    return ret;
+  }
+
+  // The actual AT+CNTP sync command (execution type)
+  // AT+CNTP (execute) returns OK then +CNTP: <code> URC
+  // Your send_at_cmd will get the initial "OK". We need to wait for the URC.
+  // This part might need more robust URC handling in your main loop or a
+  // dedicated listener. For simplicity here, we'll send AT+CNTP and then poll
+  // CCLK.
+  memset(response, 0, sizeof(response));
+  ret = send_at_cmd(handle, &AT_CNTP, AT_CMD_TYPE_EXECUTE, NULL, response,
+                    sizeof(response), 5000); // Timeout for initial OK
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "AT+CNTP execute command failed: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  ESP_LOGI(TAG, "AT+CNTP command sent. Waiting for synchronization (expecting "
+                "+CNTP: 1 URC)...");
+  // Wait for URC or check CCLK after a delay. A proper URC handler is better.
+  // Max response time for +CNTP URC is not explicitly defined but can take
+  // time.
+  for (int i = 0; i < 15; i++) { // Poll CCLK for up to ~75 seconds
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    memset(cclk_check_response, 0, sizeof(cclk_check_response));
+    ret = send_at_cmd(handle, &AT_CCLK, AT_CMD_TYPE_READ, NULL,
+                      cclk_check_response, sizeof(cclk_check_response), 5000);
+    if (ret == ESP_OK && strstr(cclk_check_response, "+CCLK: \"") != NULL &&
+        strstr(cclk_check_response, "80/01/06") == NULL) {
+      ESP_LOGI(TAG, "Time synchronized via NTP (AT+CNTP): %s",
+               cclk_check_response);
+      return ESP_OK;
+    }
+    ESP_LOGI(TAG, "NTP sync attempt %d/15, CCLK: %s", i + 1,
+             cclk_check_response);
+  }
+
+  ESP_LOGE(TAG, "NTP synchronization failed or timed out.");
+  return ESP_FAIL;
 }
