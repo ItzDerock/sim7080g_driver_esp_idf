@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_check.h"
 #include "sim7080g_at_commands.h"
 #include "sim7080g_driver_esp_idf.h"
 
@@ -396,48 +397,137 @@ sim7080g_app_network_activate(const sim7080g_handle_t *sim7080g_handle) {
     ESP_LOGE(TAG, "Invalid parameters");
     return ESP_ERR_INVALID_ARG;
   }
-  // ESP_LOGI(TAG, "Sending Activating network APP network PDP context cmd");
-  // To ensure clear state - deactivate first (if currently active), then clear
-  // any pending errors
-  int pdpidx = 0;
+
+  int pdpidx = 0; // Assuming PDP context 0 for app network
   int status;
-  char address[64] = {0};
-  esp_err_t ret = sim7080g_get_app_network_active(
-      sim7080g_handle, pdpidx, &status, address, sizeof(address));
-  if (ret == ESP_OK) {
-    if (status == 2) { // IF network  is  already active
-      ret = sim7080g_app_network_deactivate(sim7080g_handle);
-      if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to deactivate network before activating");
-        return ret;
-      }
-      return ESP_OK;
-    }
+  char address[64] = {0}; // Buffer for IP address
+  esp_err_t ret;
+
+  // Check current status first
+  ret = sim7080g_get_app_network_active(sim7080g_handle, pdpidx, &status,
+                                        address, sizeof(address));
+
+  if (ret == ESP_OK &&
+      (status == 1 || status == 2)) { // 1: Activated, 2: In Operation
+    ESP_LOGI(TAG, "APP Network PDP Context %d already active with IP: %s",
+             pdpidx, address);
+    // If it's already active and has an IP, we might not need to do anything
+    // further. However, the original logic deactivates if status is 2. Let's
+    // refine this. If status is 1 (Activated but maybe no IP yet) or 2 (In
+    // operation with IP) we can consider it successfully active for now. The
+    // original code had: if (status == 2) { ret =
+    // sim7080g_app_network_deactivate... } This seems counter-intuitive if the
+    // goal is to activate. For now, let's assume if it's 1 or 2, it's good.
+    return ESP_OK;
+  } else if (ret != ESP_OK) {
+    ESP_LOGE(TAG,
+             "Failed to get initial APP network status before activating: %s",
+             esp_err_to_name(ret));
+    // Potentially proceed to cycle CFUN and attempt activation
   } else {
-    ESP_LOGE(TAG, "Failed to get network status before activating");
-    return ret;
+    ESP_LOGI(TAG,
+             "APP Network PDP Context %d is currently deactivated (status: "
+             "%d). Proceeding with activation.",
+             pdpidx, status);
   }
 
+  ESP_LOGI(TAG, "Cycling CFUN before attempting network activation.");
   ret = sim7080g_cycle_cfun(sim7080g_handle);
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to cycle CFUN before activating network");
-    return ret;
+    ESP_LOGE(TAG, "Failed to cycle CFUN before activating network: %s",
+             esp_err_to_name(ret));
+    return ret; // If CFUN cycle fails, probably not worth proceeding
   }
 
+  ESP_LOGI(TAG, "Waiting for network registration after CFUN cycle...");
+  bool registered = false;
+  // AT+COPS? previously showed AcT=7 (LTE), so we check AT+CEREG?
+  for (int reg_attempts = 0; reg_attempts < 30;
+       reg_attempts++) { // Try for up to 60 seconds (30 * 2s)
+    char cereg_resp[AT_RESPONSE_MAX_LEN] = {0};
+    // Ensure AT_CEREG is properly defined in your sim7080g_at_commands.c/h
+    ret = send_at_cmd(sim7080g_handle, &AT_CEREG, AT_CMD_TYPE_READ, NULL,
+                      cereg_resp, sizeof(cereg_resp), 2000);
+    if (ret == ESP_OK) {
+      int n_cereg, stat_cereg;
+      char *cereg_payload = strstr(cereg_resp, "+CEREG:");
+      // Expected: +CEREG: <n>,<stat>[,<tac>,<ci>,<AcT>]
+      // We only need <n> and <stat> for basic check
+      if (cereg_payload &&
+          sscanf(cereg_payload, "+CEREG: %d,%d", &n_cereg, &stat_cereg) >= 2) {
+        ESP_LOGI(TAG, "Network registration status (AT+CEREG?): n=%d, stat=%d",
+                 n_cereg, stat_cereg);
+        if (stat_cereg == 1 ||
+            stat_cereg == 5) { // 1: Registered, home; 5: Registered, roaming
+          ESP_LOGI(TAG, "Network registered (CEREG status: %d).", stat_cereg);
+          registered = true;
+          break; // Exit loop once registered
+        }
+      } else {
+        ESP_LOGW(TAG, "Failed to parse AT+CEREG response: %s", cereg_resp);
+      }
+    } else {
+      ESP_LOGW(TAG, "Failed to read AT+CEREG: %s", esp_err_to_name(ret));
+    }
+    vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds before next poll
+  }
+
+  if (!registered) {
+    ESP_LOGE(TAG, "Failed to register on network after CFUN cycle and polling. "
+                  "Cannot activate PDP context.");
+    return ESP_FAIL; // Cannot proceed if not registered
+  }
+
+  ESP_LOGI(TAG,
+           "Attempting to activate APP Network PDP Context %d (AT+CNACT=0,1)",
+           pdpidx);
   // Repeat this command multiple times - response needs to be validated -
   // sometimes it can return OK and still be deactive
-  for (int i = 0; i < 3; i++) {
-    char response[AT_RESPONSE_MAX_LEN] = {0};
+  for (int i = 0; i < 3; i++) { // Try 3 times to activate
+    char response_cnact[AT_RESPONSE_MAX_LEN] = {0};
+    ESP_LOGI(TAG, "AT+CNACT=0,1 attempt %d/3", i + 1);
     ret = send_at_cmd(sim7080g_handle, &AT_CNACT, AT_CMD_TYPE_WRITE, "0,1",
-                      response, sizeof(response), 15000);
+                      response_cnact, sizeof(response_cnact),
+                      30000); // Increased timeout for CNACT
+
     if (ret == ESP_OK) {
-      if (strstr(response, "+APP PDP: 0,ACTIVE") != NULL) {
-        ESP_LOGI(TAG, "Network activated successfully");
+      // The "OK" for AT+CNACT=0,1 comes quickly.
+      // The actual status is given by the URC "+APP PDP: 0,ACTIVE" or "+APP
+      // PDP: 0,DEACTIVE" or by querying AT+CNACT?
+      ESP_LOGI(TAG, "AT+CNACT=0,1 command sent successfully. Response: %s",
+               response_cnact);
+      ESP_LOGI(TAG, "Waiting a moment for URC or status update...");
+      vTaskDelay(pdMS_TO_TICKS(3000)); // Wait for URC or for status to settle
+
+      // Now explicitly check the status
+      ret = sim7080g_get_app_network_active(sim7080g_handle, pdpidx, &status,
+                                            address, sizeof(address));
+      if (ret == ESP_OK &&
+          (status == 1 || status == 2)) { // 1: Activated, 2: In Operation
+        ESP_LOGI(
+            TAG,
+            "APP Network PDP Context %d activated successfully with IP: %s",
+            pdpidx, address);
         return ESP_OK;
+      } else {
+        ESP_LOGW(TAG,
+                 "After AT+CNACT=0,1 attempt %d, context still not active "
+                 "(status: %d, err: %s)",
+                 i + 1, status, esp_err_to_name(ret));
       }
+    } else {
+      ESP_LOGE(TAG, "send_at_cmd for AT+CNACT=0,1 attempt %d failed: %s", i + 1,
+               esp_err_to_name(ret));
+    }
+    if (i < 2) {                       // If not the last attempt
+      vTaskDelay(pdMS_TO_TICKS(5000)); // Wait before retrying CNACT
     }
   }
-  ESP_LOGE(TAG, "Failed to activate network");
+
+  ESP_LOGE(
+      TAG,
+      "Failed to activate APP Network PDP Context %d after multiple attempts.",
+      pdpidx);
   return ESP_FAIL;
 }
 
@@ -1274,22 +1364,22 @@ sim7080g_set_verbose_error_reporting(const sim7080g_handle_t *sim7080g_handle) {
 
 static esp_err_t send_at_cmd(const sim7080g_handle_t *sim7080g_handle,
                              const at_cmd_t *cmd, at_cmd_type_t type,
-                             const char *args, char *response,
-                             size_t response_size, uint32_t timeout_ms) {
+                             const char *args, char *response_buffer,
+                             size_t response_buffer_size,
+                             uint32_t overall_timeout_ms) {
   if (!sim7080g_handle || !sim7080g_handle->uart_initialized) {
-    ESP_LOGE(TAG, "Send AT cmd failed: SIM7080G driver not initialized");
+    ESP_LOGE(TAG, "SIM7080G driver not initialized");
     return ESP_ERR_INVALID_STATE;
   }
 
-  if (cmd == NULL || response == NULL || response_size == 0) {
-    ESP_LOGE(TAG, "Send AT cmd failed: Invalid parameters");
+  if (cmd == NULL || response_buffer == NULL || response_buffer_size == 0) {
+    ESP_LOGE(TAG, "Invalid parameters");
     return ESP_ERR_INVALID_ARG;
   }
 
-  char at_cmd[AT_CMD_MAX_LEN] = {0};
+  char at_cmd_str[AT_CMD_MAX_LEN] = {0};
   const at_cmd_info_t *cmd_info;
 
-  // Determine the correct command string based on the command type
   switch (type) {
   case AT_CMD_TYPE_TEST:
     cmd_info = &cmd->test;
@@ -1304,81 +1394,206 @@ static esp_err_t send_at_cmd(const sim7080g_handle_t *sim7080g_handle,
     cmd_info = &cmd->execute;
     break;
   default:
-    ESP_LOGE(TAG, "Send AT cmd failed: Invalid command type");
+    ESP_LOGE(TAG, "Invalid command type");
     return ESP_ERR_INVALID_ARG;
   }
 
   if (cmd_info->cmd_string == NULL) {
-    ESP_LOGE(TAG, "Send AT cmd failed: Command string is NULL");
-    return ESP_ERR_INVALID_ARG;
+    // This can be valid for commands that only have, e.g., a read but no
+    // execute form. The calling function should ensure it's calling a valid
+    // type for the command.
+    ESP_LOGE(TAG,
+             "Command string is NULL for the specified type of command '%s'",
+             cmd->name);
+    return ESP_ERR_NOT_SUPPORTED; // Or ESP_ERR_INVALID_ARG
   }
 
-  // Format the AT command string
   if (type == AT_CMD_TYPE_WRITE && args != NULL) {
-    if (snprintf(at_cmd, sizeof(at_cmd), "%s%s\r\n", cmd_info->cmd_string,
-                 args) >= sizeof(at_cmd)) {
-      ESP_LOGE(TAG, "Send AT cmd failed: AT command too long");
+    if (snprintf(at_cmd_str, sizeof(at_cmd_str), "%s%s\r\n",
+                 cmd_info->cmd_string, args) >= sizeof(at_cmd_str)) {
+      ESP_LOGE(TAG, "AT command too long (write with args)");
       return ESP_ERR_INVALID_SIZE;
     }
   } else {
-    if (snprintf(at_cmd, sizeof(at_cmd), "%s\r\n", cmd_info->cmd_string) >=
-        sizeof(at_cmd)) {
-      ESP_LOGE(TAG, "Send AT cmd failed: AT command too long");
+    if (snprintf(at_cmd_str, sizeof(at_cmd_str), "%s\r\n",
+                 cmd_info->cmd_string) >= sizeof(at_cmd_str)) {
+      ESP_LOGE(TAG, "AT command too long (other types)");
       return ESP_ERR_INVALID_SIZE;
     }
   }
 
-  esp_err_t ret = ESP_FAIL;
-  for (int retry = 0; retry < AT_CMD_MAX_RETRIES; retry++) {
-    ESP_LOGI(TAG, "Sending AT command (attempt %d/%d): %s", retry + 1,
-             AT_CMD_MAX_RETRIES, at_cmd);
-    ESP_LOGI(TAG, "Command description: %s", cmd->description);
+  esp_err_t final_ret = ESP_FAIL;
 
-    // Clear any pending data in UART buffers
-    uart_flush(sim7080g_handle->uart_config.port_num);
+  for (int retry = 0; retry < AT_CMD_MAX_RETRIES; retry++) {
+    ESP_LOGI(TAG, "Sending (attempt %d/%d): %s", retry + 1, AT_CMD_MAX_RETRIES,
+             at_cmd_str);
+    ESP_LOGD(TAG, "Cmd Desc: %s", cmd->description);
+
+    uart_flush_input(sim7080g_handle->uart_config.port_num);
 
     int bytes_written = uart_write_bytes(sim7080g_handle->uart_config.port_num,
-                                         at_cmd, strlen(at_cmd));
-    if (bytes_written < 0) {
-      ESP_LOGE(TAG, "Send AT cmd failed: Failed to send AT command");
-      ret = ESP_FAIL;
+                                         at_cmd_str, strlen(at_cmd_str));
+    if (bytes_written != strlen(at_cmd_str)) {
+      ESP_LOGE(TAG,
+               "Failed to write full AT command to UART. Wrote %d, expected %d",
+               bytes_written, strlen(at_cmd_str));
+      final_ret = ESP_FAIL;           // Or a more specific UART error
+      vTaskDelay(pdMS_TO_TICKS(100)); // Small delay before retry
       continue;
     }
 
-    int bytes_read =
-        uart_read_bytes(sim7080g_handle->uart_config.port_num, response,
-                        response_size - 1, pdMS_TO_TICKS(timeout_ms));
-    if (bytes_read < 0) {
-      ESP_LOGE(TAG, "Send AT cmd failed: Failed to read AT command response");
-      ret = ESP_FAIL;
-      continue;
+    size_t current_response_len = 0;
+    memset(response_buffer, 0, response_buffer_size);
+    TickType_t start_ticks = xTaskGetTickCount();
+    TickType_t overall_timeout_ticks = pdMS_TO_TICKS(overall_timeout_ms);
+
+    while (xTaskGetTickCount() - start_ticks < overall_timeout_ticks) {
+      TickType_t ticks_to_wait_for_read =
+          pdMS_TO_TICKS(250); // Short timeout for each read attempt
+                              // This will be effectively shortened by
+                              // uart_set_rx_timeout if data flow pauses.
+      TickType_t elapsed_ticks = xTaskGetTickCount() - start_ticks;
+      if (elapsed_ticks + ticks_to_wait_for_read > overall_timeout_ticks) {
+        ticks_to_wait_for_read = (overall_timeout_ticks > elapsed_ticks)
+                                     ? (overall_timeout_ticks - elapsed_ticks)
+                                     : 0;
+      }
+      if (ticks_to_wait_for_read == 0 &&
+          current_response_len ==
+              0) { // Avoid 0 tick wait if nothing read yet and timeout hit
+        ESP_LOGW(TAG,
+                 "Immediate overall timeout before any read for attempt %d",
+                 retry + 1);
+        final_ret = ESP_ERR_TIMEOUT;
+        goto next_retry_label; // Break from inner while and proceed to next
+                               // retry
+      }
+
+      int bytes_read = uart_read_bytes(
+          (uart_port_t)sim7080g_handle->uart_config.port_num,
+          (uint8_t *)(response_buffer + current_response_len),
+          response_buffer_size - 1 -
+              current_response_len, // Leave space for null terminator
+          ticks_to_wait_for_read);
+
+      if (bytes_read > 0) {
+        current_response_len += bytes_read;
+        response_buffer[current_response_len] =
+            '\0'; // Keep it null-terminated for strstr
+
+        // Log only the newly read part for less verbose debug, or full if
+        // needed ESP_LOGD(TAG_SEND_CMD, "Read chunk (%d bytes): \"%s\"",
+        // bytes_read, response_buffer + current_response_len - bytes_read);
+        ESP_LOGD(TAG, "Full response so far (%zu bytes): \"%s\"",
+                 current_response_len, response_buffer);
+
+        // Check for final success terminators (more robustly)
+        if (strstr(response_buffer, "\r\nOK\r\n") != NULL) {
+          ESP_LOGI(TAG,
+                   "AT command SUCCESS (found \"\\r\\nOK\\r\\n\"). Full "
+                   "response: %s",
+                   response_buffer);
+          return ESP_OK;
+        }
+        // Some modems might send just "OK\r\n"
+        if (current_response_len >= 4 &&
+            strcmp(response_buffer + current_response_len - 4, "OK\r\n") == 0) {
+          // Check if this OK\r\n is preceded by another \r\n (common for
+          // multi-line responses ending in OK)
+          if (current_response_len >= 6 &&
+              strncmp(response_buffer + current_response_len - 6, "\r\nOK\r\n",
+                      6) == 0) {
+            ESP_LOGI(TAG,
+                     "AT command SUCCESS (found \"\\r\\nOK\\r\\n\"). Full "
+                     "response: %s",
+                     response_buffer);
+            return ESP_OK;
+          } else if (strstr(response_buffer, cmd_info->cmd_string) ==
+                         response_buffer ||
+                     strstr(response_buffer, cmd->name) == response_buffer) {
+            // If it's a simple command and OK\r\n is the only thing after echo
+            // (if any)
+            ESP_LOGI(TAG,
+                     "AT command SUCCESS (found \"OK\\r\\n\" likely as final). "
+                     "Full response: %s",
+                     response_buffer);
+            return ESP_OK;
+          }
+        }
+
+        // Check for final error terminators
+        if (strstr(response_buffer, "\r\nERROR\r\n") != NULL ||
+            strstr(response_buffer, "+CME ERROR:") != NULL ||
+            strstr(response_buffer, "+CMS ERROR:") != NULL) {
+          ESP_LOGE(TAG,
+                   "AT command FAILED (found ERROR or CME/CMS ERROR). Full "
+                   "response: %s",
+                   response_buffer);
+          final_ret = ESP_FAIL;
+          goto next_retry_label; // Break from inner while and proceed to next
+                                 // retry
+        }
+
+        // Handle specific prompts if defined in at_cmd_t
+        if (cmd_info->response_format != NULL) {
+          if (strcmp(cmd_info->response_format, ">") == 0 &&
+              strstr(response_buffer, "\r\n> ") !=
+                  NULL) { // Note the space after >
+            ESP_LOGI(TAG, "AT command received prompt '>'. Full response: %s",
+                     response_buffer);
+            return ESP_OK; // Let caller handle data sending
+          }
+          if (strcmp(cmd_info->response_format, "DOWNLOAD") == 0 &&
+              strstr(response_buffer, "\r\nDOWNLOAD\r\n") != NULL) {
+            ESP_LOGI(TAG,
+                     "AT command received prompt 'DOWNLOAD'. Full response: %s",
+                     response_buffer);
+            return ESP_OK; // Let caller handle data sending
+          }
+        }
+
+      } else if (bytes_read == 0) {
+        // uart_read_bytes timed out for this short read attempt
+        // (ticks_to_wait_for_read) OR uart_set_rx_timeout triggered. This is
+        // expected if the modem pauses between lines. The outer while loop
+        // (overall_timeout_ms) will continue. No action needed here, just let
+        // it loop to try reading again.
+      } else { // bytes_read < 0 (error)
+        ESP_LOGE(TAG, "UART read error: %d", bytes_read);
+        final_ret = ESP_FAIL;  // Or a more specific UART error
+        goto next_retry_label; // Break from inner while and proceed to next
+                               // retry
+      }
+
+      if (current_response_len >= response_buffer_size - 1) {
+        ESP_LOGE(TAG,
+                 "Response buffer full before finding terminator. Current "
+                 "buffer: %s",
+                 response_buffer);
+        final_ret = ESP_ERR_NO_MEM; // Or ESP_ERR_INVALID_RESPONSE
+        goto next_retry_label;
+      }
+    } // end while waiting for response / overall_timeout
+
+    // If we exit the while loop here, it means overall_timeout_ms was reached
+    // for this attempt
+    ESP_LOGW(
+        TAG,
+        "Overall timeout for AT command attempt %d. Current buffer: \"%s\"",
+        retry + 1, response_buffer);
+    final_ret = ESP_ERR_TIMEOUT;
+
+  next_retry_label:; // Label for goto
+    if (final_ret != ESP_OK && retry < AT_CMD_MAX_RETRIES - 1) {
+      vTaskDelay(pdMS_TO_TICKS(500)); // Delay before retrying
     }
+  } // end for retry loop
 
-    ESP_LOGI(TAG, "Received %d bytes. Raw Response: %s", bytes_read, response);
-
-    // Ensure null-termination
-    response[bytes_read] = '\0';
-
-    // Check for expected response or error
-    if (strstr(response, "OK") != NULL) {
-      ESP_LOGI(TAG, "Send AT cmd SUCCESS: AT command send returned OK");
-      return ESP_OK;
-    } else if (strstr(response, "ERROR") != NULL) {
-      ESP_LOGE(TAG, "Send AT cmd failed: AT command send returned ERROR");
-      ret = ESP_FAIL;
-      continue;
-    } else if (bytes_read == 0) {
-      ESP_LOGW(TAG, "Send AT cmd failed: AT command timeout");
-      ret = ESP_ERR_TIMEOUT;
-      continue;
-    } else {
-      ESP_LOGW(TAG, "Send AT cmd failed: Unexpected AT command response");
-      ret = ESP_FAIL;
-    }
-  }
-
-  ESP_LOGE(TAG, "Send AT cmd failed after %d attempts", AT_CMD_MAX_RETRIES);
-  return ret;
+  ESP_LOGE(
+      TAG,
+      "Send AT cmd failed after %d attempts. Last error: %s. Last response: %s",
+      AT_CMD_MAX_RETRIES, esp_err_to_name(final_ret), response_buffer);
+  return final_ret;
 }
 
 static void
@@ -1410,31 +1625,30 @@ sim7080g_uart_init(const sim7080g_uart_config_t sim7080g_uart_config) {
       .source_clk = UART_SCLK_DEFAULT,
   };
 
-  esp_err_t err =
+  ESP_RETURN_ON_ERROR(
       uart_driver_install((uart_port_t)sim7080g_uart_config.port_num,
-                          SIM87080G_UART_BUFF_SIZE * 2, 0, 0, NULL, 0);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Error installing UART driver: %s", esp_err_to_name(err));
-    return err;
-  }
+                          SIM87080G_UART_BUFF_SIZE * 2, 0, 0, NULL, 0),
+      TAG, "Error installing UART driver");
 
-  err = uart_param_config((uart_port_t)sim7080g_uart_config.port_num,
-                          &uart_config);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Error configuring UART parameters: %s",
-             esp_err_to_name(err));
-    return err;
-  }
+  ESP_RETURN_ON_ERROR(
+      uart_param_config((uart_port_t)sim7080g_uart_config.port_num,
+                        &uart_config),
+      TAG, "Error configuring UART parameters");
 
-  err = uart_set_pin((uart_port_t)sim7080g_uart_config.port_num,
-                     sim7080g_uart_config.gpio_num_tx,
-                     sim7080g_uart_config.gpio_num_rx, UART_PIN_NO_CHANGE,
-                     UART_PIN_NO_CHANGE);
+  ESP_RETURN_ON_ERROR(uart_set_pin((uart_port_t)sim7080g_uart_config.port_num,
+                                   sim7080g_uart_config.gpio_num_tx,
+                                   sim7080g_uart_config.gpio_num_rx,
+                                   UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE),
+                      TAG, "Error setting UART pins");
 
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Error setting UART pins: %s", esp_err_to_name(err));
-    return err;
-  }
+  // Configure RX FIFO timeout.
+  // Triggered when RX FIFO has data but remains idle for 'tout_thresh'
+  // at 115200 baud, 1 symbol = ~86.8us, so tout_thresh = 20 means ~1.736ms
+  uint8_t rx_timeout_thresh = 20;
+  ESP_RETURN_ON_ERROR(
+      uart_set_rx_timeout((uart_port_t)sim7080g_uart_config.port_num,
+                          rx_timeout_thresh),
+      TAG, "Error setting RX timeout");
 
   return ESP_OK;
 }

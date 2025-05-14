@@ -234,6 +234,35 @@ const at_cmd_t AT_CREBOOT = {
     .execute = {EXECUTE_CMD("AT+CREBOOT"), "OK"} // Modem reboots, "OK" might be received before full reboot
 };
 
+const at_cmd_t AT_CFSGFIS = {
+    .name = "AT+CFSGFIS",
+    .description = "Get File Size from Filesystem",
+    .test = {TEST_CMD("AT+CFSGFIS"), "+CFSGFIS:"}, // Example: (0-3),230
+    .read = {0}, // Not applicable
+    .write = {WRITE_CMD("AT+CFSGFIS"), "+CFSGFIS: %d"}, // Response if OK: +CFSGFIS: <size>. Error if not found.
+    .execute = {0}
+};
+
+const at_cmd_t AT_CFSRFILE = {
+    .name = "AT+CFSRFILE",
+    .description = "Read File from Filesystem",
+    // For AT+CFSRFILE, the response is more complex: +CFSRFILE: <length>\r\n<data>\r\nOK\r\n
+    .test = {TEST_CMD("AT+CFSRFILE"), "+CFSRFILE:"},
+    .read = {0}, // Not applicable
+    .write = {WRITE_CMD("AT+CFSRFILE"), "+CFSRFILE: %d"}, // Expects +CFSRFILE: <length_of_data_read>
+    .execute = {0}
+};
+
+const at_cmd_t AT_CFSDFILE = {
+    .name = "AT+CFSDFILE",
+    .description = "Delete File from Filesystem",
+    .test = {TEST_CMD("AT+CFSDFILE"), "+CFSDFILE:"}, // Example: (0-3),230
+    .read = {0}, // Not applicable
+    .write = {WRITE_CMD("AT+CFSDFILE"), "OK"}, // Expects OK on success
+    .execute = {0}
+};
+
+
 // TODO - Implement this if its found relevant later to check  transport layer connection
 //  const at_cmd_t AT_CASTATE = {
 //      .name = "AT+CASTATE",

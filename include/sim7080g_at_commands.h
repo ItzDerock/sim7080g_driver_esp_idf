@@ -444,6 +444,49 @@ extern const at_cmd_t AT_CNTP;
 ///  - +CME ERROR: <err>
 extern const at_cmd_t AT_CREBOOT;
 
+/// @brief Get File Size
+/// @details This command is used to get the size of a specified file in the
+/// flash file system.
+/// @param index Directory of AP filesystem (0: "/custapp/", 1: "/fota/", 2:
+/// "/datatx/", 3: "/customer/")
+/// @param file_name File name (max 230 chars)
+/// @return On success:
+///  - +CFSGFIS: <file_size>
+///  - OK
+/// @return On failure:
+///  - ERROR
+///  - +CME ERROR: <err>
+extern const at_cmd_t AT_CFSGFIS;
+
+/// @brief Read File from Flash
+/// @details This command is used to read data from a specified file in the
+/// flash file system.
+/// @param index Directory of AP filesystem (0: "/custapp/", 1: "/fota/", 2:
+/// "/datatx/", 3: "/customer/")
+/// @param file_name File name (max 230 chars)
+/// @param mode Read mode (0: Read from beginning, 1: Read from <position>)
+/// @param file_size Number of bytes to read (max 10240)
+/// @param position Starting position to read from (used if mode is 1)
+/// @return On success (data will be output to serial port):
+///  - OK
+/// @return On failure:
+///  - ERROR
+///  - +CME ERROR: <err>
+extern const at_cmd_t AT_CFSRFILE;
+
+/// @brief Delete the File from the Flash
+/// @details This command is used to delete a specified file from the flash file
+/// system.
+/// @param index Directory of AP filesystem (0: "/custapp/", 1: "/fota/", 2:
+/// "/datatx/", 3: "/customer/")
+/// @param file_name File name (max 230 chars)
+/// @return On success:
+///  - OK
+/// @return On failure:
+///  - ERROR
+///  - +CME ERROR: <err>
+extern const at_cmd_t AT_CFSDFILE;
+
 // TODO - AT+CGSN - request product serial number ID
 // TODO - AT+CGMI - request manf id
 // TODO - AT+CGMM - request model id
